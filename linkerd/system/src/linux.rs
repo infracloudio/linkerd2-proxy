@@ -1,9 +1,12 @@
 use libc::{self, pid_t};
-use procinfo::pid;
+use procfs::{
+    process::{self, Process},
+    ProcResult,
+};
 use std::{fs, io};
 use tracing::{error, warn};
 
-pub use procinfo::pid::Stat;
+pub use process::Stat;
 
 pub fn page_size() -> io::Result<u64> {
     sysconf(libc::_SC_PAGESIZE, "page size")
@@ -24,8 +27,8 @@ pub fn ms_per_tick() -> io::Result<u64> {
     Ok(ms_per_tick)
 }
 
-pub fn blocking_stat() -> io::Result<Stat> {
-    pid::stat_self()
+pub fn blocking_stat() -> ProcResult<Stat> {
+    Process::myself()?.stat()
 }
 
 pub fn open_fds(pid: pid_t) -> io::Result<u64> {
@@ -39,9 +42,28 @@ pub fn open_fds(pid: pid_t) -> io::Result<u64> {
 }
 
 pub fn max_fds() -> io::Result<Option<u64>> {
-    let limit = pid::limits_self()?.max_open_files;
-    let max_fds = limit.soft.or(limit.hard).map(|max| max as u64);
-    Ok(max_fds)
+    match Process::myself() {
+        Ok(p) => match p.limits() {
+            Ok(limits) => {
+                let limit = limits.max_open_files;
+                match limit.soft_limit {
+                    process::LimitValue::Unlimited => match limit.hard_limit {
+                        process::LimitValue::Unlimited => Ok(None),
+                        process::LimitValue::Value(v) => Ok(Some(v)),
+                    },
+                    process::LimitValue::Value(v) => Ok(Some(v)),
+                }
+            }
+            Err(e) => {
+                error!("Failed to get process limits: {}", e);
+                Ok(None)
+            }
+        },
+        Err(e) => {
+            error!("Failed to get process limits: {}", e);
+            Ok(None)
+        }
+    }
 }
 
 #[allow(unsafe_code)]
